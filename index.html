@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Cartoon Animation Agent</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#10131b;color:#f4f5f8;font:15px system-ui,Arial}
+header{padding:14px 16px;background:#191f2b;border-bottom:1px solid #30394a}h1{font-size:19px;margin:0 0 4px}header p{margin:0;color:#aeb8c8;font-size:12px}
+main{max-width:1000px;margin:auto;padding:12px;display:grid;gap:12px}
+.panel{background:#191f2b;border:1px solid #30394a;border-radius:14px;padding:12px}
+label{display:block;font-weight:650;margin-bottom:7px}textarea{width:100%;min-height:112px;resize:vertical;border:1px solid #465269;border-radius:10px;background:#0e121a;color:#fff;padding:11px;font:14px/1.5 system-ui}
+.controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}button{border:0;border-radius:10px;padding:11px 14px;background:#6d83ff;color:white;font-weight:700;font-size:14px}button.secondary{background:#30394a}button:disabled{opacity:.45}
+#stage{width:100%;height:min(58vw,480px);min-height:260px;border-radius:12px;overflow:hidden;background:linear-gradient(#84b8e8,#d9e7f2 65%,#788b61 65%);position:relative}
+#stage canvas{display:block;width:100%;height:100%}
+.meta{display:flex;justify-content:space-between;gap:8px;color:#aeb8c8;font-size:12px;margin-top:8px}
+#sceneList{display:flex;gap:7px;overflow-x:auto;margin-top:10px;padding-bottom:3px}
+.scene{flex:0 0 auto;border:1px solid #465269;border-radius:9px;padding:7px 9px;color:#dce3ef;font-size:12px;max-width:190px}
+.scene.active{border-color:#8b9aff;background:#293251}
+.note{color:#aeb8c8;font-size:12px;line-height:1.45}
+@media(min-width:760px){main{grid-template-columns:1fr 1fr} .wide{grid-column:1/-1}}
+</style>
+</head>
+<body>
+<header><h1>🎬 Cartoon Animation Agent</h1><p>Free procedural 3D prototype · runs in your browser</p></header>
+<main>
+<section class="panel">
+<label for="story">Your story / script</label>
+<textarea id="story">A boy walks along a quiet road. He sees a red car and runs towards it. The boy stops beside the car and looks around.</textarea>
+<div class="controls">
+<button id="generate">Generate animation</button>
+<button id="play" class="secondary" disabled>Play</button>
+<button id="record" class="secondary" disabled>Record video</button>
+</div>
+<p class="note">Write a few short sentences. The agent splits them into scenes and chooses simple actions from the words in your script.</p>
+</section>
+<section class="panel">
+<label>3D preview</label>
+<div id="stage"></div>
+<div class="meta"><span id="status">Waiting for a story</span><span id="counter">0 scenes</span></div>
+<div id="sceneList"></div>
+</section>
+<section class="panel wide">
+<b>What this first version does</b>
+<ul class="note">
+<li>Creates randomized round-headed cartoon characters and outfits.</li>
+<li>Builds a simple 3D outdoor scene with ground, trees and optional car.</li>
+<li>Recognizes basic actions such as walk, run, sit, jump and look.</li>
+<li>Plays scenes automatically with animated characters and camera movement.</li>
+<li>Can record the preview as a WebM video where supported by your browser.</li>
+</ul>
+<p class="note"><b>Honest limitation:</b> This first engine is procedural 3D, not a generative AI model. It does not yet understand every story detail or generate photorealistic AI assets. It is a free foundation we can improve.</p>
+</section>
+</main>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+const stage=document.getElementById('stage');
+const statusEl=document.getElementById('status');
+const counter=document.getElementById('counter');
+const sceneList=document.getElementById('sceneList');
+const generateBtn=document.getElementById('generate');
+const playBtn=document.getElementById('play');
+const recordBtn=document.getElementById('record');
+
+const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(stage.clientWidth,stage.clientHeight);
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+renderer.outputColorSpace=THREE.SRGBColorSpace;
+renderer.toneMapping=THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure=1.15;
+stage.appendChild(renderer.domElement);
+
+const camera=new THREE.PerspectiveCamera(42,stage.clientWidth/stage.clientHeight,.1,100);
+camera.position.set(0,4.4,10);
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x9ac8eb);
+scene.fog=new THREE.Fog(0x9ac8eb,22,42);
+scene.add(new THREE.HemisphereLight(0xffffff,0x61704c,2.0));
+const sun=new THREE.DirectionalLight(0xfff1d8,3.0);sun.position.set(-5,10,7);sun.castShadow=true;sun.shadow.mapSize.set(1024,1024);scene.add(sun);
+
+let world=new THREE.Group();scene.add(world);
+let plans=[],current=0,playing=false,recording=false,sceneStart=0,lastTime=0,raf=0;
+const clock=new THREE.Clock();
+const palette=[0x2979d8,0xe34d4d,0x28a879,0xe2a12d,0x8b5bd6,0xe16c9b];
+
+function mat(color,rough=.85){return new THREE.MeshStandardMaterial({color,roughness:rough});}
+function addBox(parent,w,h,d,color,x,y,z){let m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat(color));m.position.set(x,y,z);m.castShadow=true;m.receiveShadow=true;parent.add(m);return m;}
+function addSphere(parent,r,color,x,y,z,sx=1,sy=1,sz=1){let m=new THREE.Mesh(new THREE.SphereGeometry(r,24,16),mat(color));m.position.set(x,y,z);m.scale.set(sx,sy,sz);m.castShadow=true;parent.add(m);return m;}
+
+function makeCharacter(seed){
+ const g=new THREE.Group(); const cloth=palette[Math.floor(Math.random()*palette.length)];
+ const skin=[0xffd6b7,0xc98f68,0x8d5b43,0xf0bd91][Math.floor(Math.random()*4)];
+ const black=0x17191f;
+ addSphere(g,.52,0xf7f7f4,0,2.25,0,1,1,.92);
+ // face looking toward camera
+ addSphere(g,.065,black,-.17,2.31,.445,.8,1,1);
+ addSphere(g,.065,black,.17,2.31,.445,.8,1,1);
+ addSphere(g,.035,0xffffff,-.19,2.34,.495);
+ addSphere(g,.035,0xffffff,.15,2.34,.495);
+ const mouth=new THREE.Mesh(new THREE.TorusGeometry(.105,.018,8,20,Math.PI),mat(0x5a2525));mouth.position.set(0,2.08,.48);mouth.rotation.z=Math.PI;g.add(mouth);
+ // neck and torso
+ addBox(g,.22,.2,.22,skin,0,1.65,0);
+ addBox(g,.72,.88,.38,cloth,0,1.1,0);
+ // arms and legs as pivot groups
+ const arms=[],legs=[];
+ for(const side of [-1,1]){
+   const a=new THREE.Group();a.position.set(side*.43,1.43,0);g.add(a);
+   addBox(a,.16,.62,.17,skin,0,-.29,0).rotation.z=side*.08;
+   addSphere(a,.105,skin,0,-.62,0);
+   arms.push(a);
+   const l=new THREE.Group();l.position.set(side*.2,.68,0);g.add(l);
+   addBox(l,.19,.67,.2,0x252b38,0,-.29,0);
+   addBox(l,.22,.12,.36,0x22242b,0,-.62,.07);
+   legs.push(l);
+ }
+ g.userData={arms,legs,mouth,phase:Math.random()*6};
+ return g;
+}
+function makeTree(x,z){
+ const t=new THREE.Group();addBox(t,.22,1.5,.22,0x765137,0,.75,0);
+ addSphere(t,.85,0x3d8752,0,2,0,1,1.15,1);
+ t.position.set(x,0,z);world.add(t);
+}
+function makeCar(){
+ const c=new THREE.Group();
+ addBox(c,2.7,.62,1.25,0xc91f2d,0,.72,0);
+ addBox(c,1.45,.65,1.08,0xa8d8eb,0,1.3,-.02);
+ for(const x of [-.85,.85]){const w=new THREE.Mesh(new THREE.CylinderGeometry(.32,.32,.18,20),mat(0x17191f));w.rotation.z=Math.PI/2;w.position.set(x,.35,.58);c.add(w);const w2=w.clone();w2.position.z=-.58;c.add(w2);}
+ c.position.set(1.9,0,-1.2);world.add(c);return c;
+}
+function buildWorld(plan){
+ world.clear();
+ const ground=new THREE.Mesh(new THREE.PlaneGeometry(60,60),mat(0x72945a));ground.rotation.x=-Math.PI/2;ground.receiveShadow=true;world.add(ground);
+ const road=addBox(world,60,.05,4,0x444950,0,.035,-1.2);
+ for(let x=-25;x<28;x+=4)addBox(world,.9,.035,.08,0xf3e6b5,x,.07,-1.2);
+ for(let i=0;i<10;i++){makeTree(-8+i*1.8,-5-(i%2)*2);makeTree(-8+i*1.8,4+(i%3));}
+ if(plan.car)makeCar();
+ const chars=[];
+ const n=plan.people;
+ for(let i=0;i<n;i++){const ch=makeCharacter();ch.position.set((i-(n-1)/2)*1.45,0,1.2);world.add(ch);chars.push(ch);}
+ return chars;
+}
+function infer(sentence){
+ const s=sentence.toLowerCase();
+ let action='idle';
+ if(/\b(run|runs|running|ran|rush|rushed)\b/.test(s))action='run';
+ else if(/\b(walk|walks|walking|went|goes|approach|approaches|approached)\b/.test(s))action='walk';
+ else if(/\b(jump|jumps|jumping|leap|leaps)\b/.test(s))action='jump';
+ else if(/\b(sit|sits|sitting|sat)\b/.test(s))action='sit';
+ else if(/\b(look|looks|looking|watch|watches|see|sees|saw)\b/.test(s))action='look';
+ else if(/\b(stop|stops|stopped)\b/.test(s))action='idle';
+ return {text:sentence,action,car:/\b(car|vehicle|taxi|truck)\b/.test(s),people:/\b(two|both|friends|men|women|people|boys|girls|they|them)\b/.test(s)?2:1};
+}
+function makePlans(text){
+ return text.split(/(?<=[.!?])\s+|\n+/).map(x=>x.trim()).filter(Boolean).slice(0,12).map(infer);
+}
+function setScene(i){
+ current=(i+plans.length)%plans.length;
+ const p=plans[current];const chars=buildWorld(p);
+ p.chars=chars;p.start=performance.now();
+ camera.position.set(p.action==='look'?0:0.2,4.2,10.2);camera.lookAt(0,1.2,0);
+ statusEl.textContent=`Scene ${current+1}: ${p.action.toUpperCase()} · ${p.text}`;
+ counter.textContent=`${plans.length} scenes`;
+ [...sceneList.children].forEach((el,j)=>el.classList.toggle('active',j===current));
+}
+function animateAction(p,t){
+ const elapsed=(t-p.start)/1000;
+ p.chars?.forEach((ch,i)=>{
+  const d=ch.userData,phase=elapsed* (p.action==='run'?11:p.action==='walk'?5:2)+d.phase;
+  d.arms.forEach((a,j)=>{a.rotation.x=(p.action==='run'?-.9:p.action==='walk'?.55:0)*Math.sin(phase+(j*Math.PI));});
+  d.legs.forEach((l,j)=>{l.rotation.x=(p.action==='run'?-.9:p.action==='walk'?.55:0)*Math.sin(phase+(j*Math.PI));});
+  ch.position.x=(i-(p.chars.length-1)/2)*1.45 + (p.action==='walk'?Math.sin(elapsed*1.4)*.8:p.action==='run'?Math.sin(elapsed*2.2)*1.1:0);
+  ch.position.y=p.action==='jump'?Math.abs(Math.sin(elapsed*3))*1.1:p.action==='sit'?.0:0;
+  if(p.action==='sit')ch.rotation.x=-.18;
+  else ch.rotation.x=0;
+  if(p.action==='look')ch.rotation.y=Math.sin(elapsed*1.2)*.45;
+ });
+ camera.position.x=Math.sin(elapsed*.25)*.65;
+ camera.position.z=10.2+Math.sin(elapsed*.35)*.4;
+ camera.lookAt(0,1.2,0);
+}
+function tick(now){
+ raf=requestAnimationFrame(tick);
+ const dt=clock.getDelta();
+ if(playing&&plans.length){
+  animateAction(plans[current],now);
+  if(now-plans[current].start>4200){if(current===plans.length-1){playing=false;playBtn.textContent='Play';}else setScene(current+1);}
+ }
+ renderer.render(scene,camera);
+}
+function startPlay(){if(!plans.length)return;playing=true;playBtn.textContent='Pause';setScene(current);}
+generateBtn.onclick=()=>{
+ const text=document.getElementById('story').value.trim();
+ if(!text){statusEl.textContent='Enter a story first';return;}
+ plans=makePlans(text);current=0;playing=false;
+ sceneList.innerHTML='';
+ plans.forEach((p,i)=>{const el=document.createElement('div');el.className='scene';el.textContent=`${i+1}. ${p.action}: ${p.text}`;sceneList.appendChild(el);});
+ playBtn.disabled=false;recordBtn.disabled=false;playBtn.textContent='Play';
+ setScene(0);statusEl.textContent=`Generated ${plans.length} scenes. Press Play.`;
+};
+playBtn.onclick=()=>{if(playing){playing=false;playBtn.textContent='Play';}else startPlay();};
+recordBtn.onclick=async()=>{
+ if(!plans.length)return;
+ if(!renderer.domElement.captureStream||!window.MediaRecorder){statusEl.textContent='Video recording is not supported in this browser.';return;}
+ const stream=renderer.domElement.captureStream(30);
+ let mime='video/webm;codecs=vp9';if(!MediaRecorder.isTypeSupported(mime))mime='video/webm';
+ const rec=new MediaRecorder(stream,{mimeType:mime});const chunks=[];
+ rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
+ rec.onstop=()=>{const blob=new Blob(chunks,{type:mime});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='cartoon-story.webm';a.click();URL.revokeObjectURL(url);statusEl.textContent='Video saved (if your browser allows downloads).';recordBtn.disabled=false;};
+ recordBtn.disabled=true;current=0;setScene(0);playing=true;playBtn.textContent='Pause';rec.start();statusEl.textContent='Recording animation…';
+ const duration=plans.length*4200;
+ setTimeout(()=>{playing=false;playBtn.textContent='Play';rec.stop();},duration);
+};
+function resize(){const w=stage.clientWidth,h=stage.clientHeight;renderer.setSize(w,h);camera.aspect=w/h;camera.updateProjectionMatrix();}
+new ResizeObserver(resize).observe(stage);
+setScene(0);
+tick(performance.now());
+</script>
+</body>
+</html>
