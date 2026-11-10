@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="theme-color" content="#101522">
+<title>3D Cartoon Story Agent</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0d1220;color:#f3f5fb;font:16px system-ui,Arial,sans-serif}
+main{max-width:900px;margin:auto;padding:18px}.panel{background:#171e2d;border:1px solid #30394d;border-radius:18px;padding:18px;margin-bottom:16px}
+h1{font-size:24px;margin:0 0 8px}h2{font-size:19px;margin:0 0 12px}.muted{color:#aab4c7;line-height:1.5}
+textarea{width:100%;min-height:145px;resize:vertical;background:#090e18;color:white;border:2px solid #3a455b;border-radius:13px;padding:14px;font:16px/1.5 system-ui}
+button{border:0;border-radius:12px;padding:13px 17px;margin:8px 7px 0 0;background:#596be0;color:white;font-weight:700;font-size:15px}
+button.secondary{background:#303a50}button:disabled{opacity:.42}
+#viewport{width:100%;height: min(62vw,490px);min-height:270px;background:#9bc6e8;border-radius:15px;overflow:hidden;position:relative}
+#viewport canvas{display:block;width:100%;height:100%}
+#status{margin-top:12px;color:#c5cee0;min-height:24px}
+#sceneList{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.scene{background:#303a50;border-radius:9px;padding:8px 11px;color:#e9edff;font-size:13px}
+.scene.active{background:#596be0}
+#diagnostic{display:none;color:#ffd6a0;background:#382a1c;border-radius:10px;padding:12px;margin-top:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:520px){main{padding:12px}.panel{padding:14px}h1{font-size:21px}#viewport{height:65vw;min-height:250px}}
+</style>
+</head>
+<body>
+<main>
+<section class="panel">
+<h1>🎬 3D Cartoon Story Agent</h1>
+<p class="muted">Write a short story. The app divides it into scenes and creates a simple animated 3D cartoon preview. No lip-sync.</p>
+<label for="story"><b>Your story / script</b></label>
+<textarea id="story">A boy walks along a quiet road. He sees a red car and runs towards it. The boy stops beside the car and looks around.</textarea>
+<div>
+<button id="generate">Generate animation</button>
+<button id="play" class="secondary" disabled>Play</button>
+<button id="pause" class="secondary" disabled>Pause</button>
+<button id="record" class="secondary" disabled>Record video</button>
+</div>
+<div id="status" aria-live="polite">Ready. Tap Generate animation.</div>
+<div id="diagnostic"></div>
+</section>
+<section class="panel">
+<h2>3D preview</h2>
+<div id="viewport"></div>
+<div id="sceneList"></div>
+<p class="muted" id="sceneInfo">Waiting for a story · 0 scenes</p>
+</section>
+</main>
+
+<!-- Classic build avoids module/import-map issues on mobile browsers. -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
+<script>
+(() => {
+"use strict";
+const $ = id => document.getElementById(id);
+const status = $("status"), diagnostic = $("diagnostic"), viewport = $("viewport");
+if (!window.THREE) {
+  status.textContent = "3D library did not load.";
+  diagnostic.style.display = "block";
+  diagnostic.textContent = "The Three.js script could not be loaded. Check your internet connection, then refresh this page.";
+  return;
+}
+let renderer, scene, camera, boy, car, sceneIndex=0, plans=[], playing=false, startedAt=0, elapsed=0, raf=0;
+let limbs=[];
+function mat(color, roughness=.8){return new THREE.MeshStandardMaterial({color,roughness});}
+function box(w,h,d,material,x,y,z){const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),material);m.position.set(x,y,z);scene.add(m);return m;}
+function sphere(r,material,x,y,z,sx=1,sy=1,sz=1){const m=new THREE.Mesh(new THREE.SphereGeometry(r,20,16),material);m.position.set(x,y,z);m.scale.set(sx,sy,sz);scene.add(m);return m;}
+function cylinder(rt,rb,h,material,x,y,z){const m=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,16),material);m.position.set(x,y,z);scene.add(m);return m;}
+function makeBoy(){
+ const group=new THREE.Group();scene.add(group);
+ const skin=mat(0xf0bd91), shirt=mat(0x2879d0), pants=mat(0x26334f), hair=mat(0x292027), shoe=mat(0x20242d), white=mat(0xffffff), black=mat(0x171717);
+ const torso=new THREE.Mesh(new THREE.CapsuleGeometry(.34,.62,5,12),shirt);torso.position.y=1.45;group.add(torso);
+ const head=new THREE.Mesh(new THREE.SphereGeometry(.42,24,20),skin);head.position.y=2.35;group.add(head);
+ const haircap=new THREE.Mesh(new THREE.SphereGeometry(.43,20,12,0,Math.PI*2,0,Math.PI*.58),hair);haircap.position.set(0,2.48,0);group.add(haircap);
+ for(const x of [-.15,.15]){const eye=new THREE.Mesh(new THREE.SphereGeometry(.045,12,10),black);eye.position.set(x,2.39,.37);group.add(eye);}
+ const nose=new THREE.Mesh(new THREE.SphereGeometry(.055,12,10),skin);nose.position.set(0,2.29,.405);group.add(nose);
+ for(const x of [-.18,.18]){
+  const leg=new THREE.Group();leg.position.set(x,1.05,0);group.add(leg);
+  const l=new THREE.Mesh(new THREE.CapsuleGeometry(.12,.55,4,10),pants);l.position.y=-.28;leg.add(l);
+  const foot=new THREE.Mesh(new THREE.BoxGeometry(.22,.12,.38),shoe);foot.position.set(0,-.58,.1);leg.add(foot);limbs.push(leg);
+  const arm=new THREE.Group();arm.position.set(x*2,1.72,0);group.add(arm);
+  const a=new THREE.Mesh(new THREE.CapsuleGeometry(.09,.48,4,10),skin);a.rotation.z=x>0?-.25:.25;a.position.y=-.25;arm.add(a);limbs.push(arm);
+ }
+ group.position.set(-1.2,0,.2);return group;
+}
+function makeWorld(){
+ scene=new THREE.Scene();scene.background=new THREE.Color(0x9bc6e8);scene.fog=new THREE.Fog(0x9bc6e8,18,42);
+ camera=new THREE.PerspectiveCamera(42,1,.1,100);camera.position.set(6,5.2,9);camera.lookAt(0,1,0);
+ scene.add(new THREE.HemisphereLight(0xffffff,0x64734c,2));
+ const sun=new THREE.DirectionalLight(0xffffff,2.2);sun.position.set(-5,10,7);scene.add(sun);
+ const grass=mat(0x66804b), roadmat=mat(0x454a53), line=mat(0xe8dfb9), bark=mat(0x68452e), leaves=mat(0x327448);
+ box(80,.2,80,grass,0,-.16,0);box(5,.08,70,roadmat,0,-.035,-2);
+ for(let z=-28;z<35;z+=5)box(.12,.025,2,line,0,.02,z);
+ for(const x of [-5,5])for(let z=-15;z<20;z+=9){cylinder(.18,.24,1.5,bark,x, .72,z);sphere(1.05,leaves,x,2,z,1,1.15,1);}
+ car=new THREE.Group();scene.add(car);car.position.set(1,0,-2);
+ const red=mat(0xd92735,.35), glass=mat(0x9ed6e8,.25), tire=mat(0x17191d), hub=mat(0xbfc6ce);
+ const body=new THREE.Mesh(new THREE.BoxGeometry(2.1,.55,1.05),red);body.position.y=.62;car.add(body);
+ const cabin=new THREE.Mesh(new THREE.BoxGeometry(1.1,.58,.9),glass);cabin.position.set(-.12,1.12,0);car.add(cabin);
+ for(const x of [-.68,.68])for(const z of [-.53,.53]){const w=new THREE.Mesh(new THREE.CylinderGeometry(.25,.25,.16,20),tire);w.rotation.x=Math.PI/2;w.position.set(x,.32,z);car.add(w);const h=new THREE.Mesh(new THREE.CylinderGeometry(.11,.11,.17,16),hub);h.rotation.x=Math.PI/2;h.position.set(x,.32,z);car.add(h);}
+ boy=makeBoy();scene.add(new THREE.AmbientLight(0xffffff,.15));
+}
+function resize(){
+ if(!renderer)return;const w=Math.max(1,viewport.clientWidth),h=Math.max(1,viewport.clientHeight);
+ renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();
+}
+try{
+ renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});
+ renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,1.6));
+ renderer.outputColorSpace=THREE.SRGBColorSpace;
+ viewport.appendChild(renderer.domElement);makeWorld();resize();
+ if(window.ResizeObserver)new ResizeObserver(resize).observe(viewport);else window.addEventListener("resize",resize);
+}catch(err){
+ status.textContent="This browser could not start 3D graphics.";
+ diagnostic.style.display="block";diagnostic.textContent=String(err);return;
+}
+function classify(text){
+ const t=text.toLowerCase();
+ return {text,action:/run|runs|running|rush/.test(t)?"run":/jump|jumps|leap/.test(t)?"jump":/sit|sits|sat/.test(t)?"sit":/look|looks|watch|see|sees/.test(t)?"look":/stop|stops|stand/.test(t)?"stop":"walk",hasCar:/car|vehicle/.test(t),hasRedCar:/red car/.test(t)};
+}
+function renderSceneButtons(){
+ const list=$("sceneList");list.innerHTML="";
+ plans.forEach((p,i)=>{const b=document.createElement("button");b.className="scene"+(i===sceneIndex?" active":"");b.textContent="Scene "+(i+1);b.onclick=()=>{playing=false;elapsed=0;setScene(i);};list.appendChild(b);});
+}
+function setScene(i){
+ if(!plans.length)return;
+ sceneIndex=Math.max(0,Math.min(i,plans.length-1));
+ const p=plans[sceneIndex];car.visible=p.hasCar;car.position.x=p.hasCar?1:8;
+ boy.position.set(p.action==="run"?-2.2:-1.2,0,.2);
+ $("sceneInfo").textContent="Scene "+(sceneIndex+1)+" of "+plans.length+" · "+p.text;
+ [...$("sceneList").children].forEach((b,n)=>b.classList.toggle("active",n===sceneIndex));
+}
+function makePlans(text){return text.split(/(?<=[.!?])\s+|\n+/).map(s=>s.trim()).filter(Boolean).map(classify);}
+function animate(now){
+ raf=requestAnimationFrame(animate);
+ const t=now/1000;
+ if(playing&&plans.length){
+  const duration=4.2;
+  const total=(now-startedAt)/1000+elapsed;
+  const next=Math.floor(total/duration);
+  if(next>=plans.length){playing=false;$("status").textContent="Animation finished."; $("play").disabled=false;$("pause").disabled=true;}
+  else if(next!==sceneIndex)setScene(next);
+  const p=plans[sceneIndex],local=(total%duration);
+  const walk=p.action==="walk"||p.action==="run";
+  boy.position.x=(p.action==="run"?-2.2+Math.min(local*.8,2.6):p.action==="walk"?-1.2+Math.min(local*.35,1.3):-1.2);
+  limbs.forEach((l,i)=>{l.rotation.x=walk?Math.sin(local*(p.action==="run"?10:6)+i*Math.PI)*.45: p.action==="jump"?Math.sin(local*4)*.4:0;});
+  if(p.action==="jump")boy.position.y=Math.abs(Math.sin(local*3))*0.8;
+  else boy.position.y=p.action==="sit"?-.25:0;
+  camera.position.x=6+Math.sin(local*.35)*.35;camera.lookAt(0,1,0);
+ }
+ renderer.render(scene,camera);
+}
+requestAnimationFrame(animate);
+$("generate").onclick=()=>{
+ const text=$("story").value.trim();
+ if(!text){status.textContent="Please type a story first.";return;}
+ plans=makePlans(text);sceneIndex=0;playing=false;elapsed=0;startedAt=0;
+ if(!plans.length){status.textContent="I couldn't find any scenes. Add a few sentences.";return;}
+ renderSceneButtons();setScene(0);
+ $("play").disabled=false;$("pause").disabled=true;$("record").disabled=!(renderer.domElement.captureStream&&window.MediaRecorder);
+ status.textContent="Created "+plans.length+" scene(s). Tap Play.";
+};
+$("play").onclick=()=>{if(!plans.length)return;if(sceneIndex===plans.length-1&&elapsed===0){} playing=true;startedAt=performance.now();$("play").disabled=true;$("pause").disabled=false;status.textContent="Playing scene "+(sceneIndex+1)+"...";};
+$("pause").onclick=()=>{if(!playing)return;elapsed+=(performance.now()-startedAt)/1000;playing=false;$("play").disabled=false;$("pause").disabled=true;status.textContent="Paused."};
+$("record").onclick=()=>{
+ if(!plans.length)return;
+ if(!renderer.domElement.captureStream||!window.MediaRecorder){status.textContent="Video recording is not supported by this browser.";return;}
+ try{
+  playing=false;elapsed=0;setScene(0);const stream=renderer.domElement.captureStream(30);
+  const mime=MediaRecorder.isTypeSupported("video/webm;codecs=vp8")?"video/webm;codecs=vp8":"video/webm";
+  const rec=new MediaRecorder(stream,{mimeType:mime}),chunks=[];
+  rec.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data)};
+  rec.onstop=()=>{const blob=new Blob(chunks,{type:"video/webm"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="cartoon-story.webm";a.click();setTimeout(()=>URL.revokeObjectURL(url),3000);status.textContent="Video saved (if your browser allowed the download).";};
+  rec.start();playing=true;startedAt=performance.now();$("status").textContent="Recording... please wait.";
+  setTimeout(()=>{playing=false;rec.stop();$("play").disabled=false;$("pause").disabled=true;},plans.length*4200);
+ }catch(e){status.textContent="Recording failed: "+e.message;}
+};
+})();
+</script>
+</body>
+</html>
